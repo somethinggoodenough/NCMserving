@@ -1,5 +1,11 @@
 # Validation record
 
+The later [F01 prefix KV report](../reports/results/F01-v1.md) adds 12 passing CPU
+tests, full 6006-sample exact parity, single-prefill structural checks, and the
+completed 90-window three-path performance matrix. Its canonical output hashes
+match the historical values below. The sections below retain the earlier F00/F11
+validation record.
+
 The executor was validated on 2026-10-23 against unmodified NCM generation at
 upstream commit `c70274273f489abc73832b2b98584a8483b6b203`, using an RTX 4060,
 PyTorch 2.6.0+cu118, FP32, and TF32 disabled.
