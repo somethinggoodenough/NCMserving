@@ -5,9 +5,25 @@ from __future__ import annotations
 import copy
 import hashlib
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any
 
 import torch
+
+from . import prefix_kv as kv
+
+
+def release_on_error(method):
+    """Release owned cache on execution failure, including direct API calls."""
+    @wraps(method)
+    def wrapped(self, state, *args, **kwargs):
+        self._validate(state)
+        try:
+            return method(self, state, *args, **kwargs)
+        except BaseException:
+            self.abort(state)
+            raise
+    return wrapped
 
 
 @dataclass
@@ -28,6 +44,7 @@ class LevelState:
     cpu_rng: torch.Tensor
     device_rng: torch.Tensor | None
     status: str = "active"
+    prefix_kv: tuple | None = None
 
     def snapshot(self) -> "LevelState":
         """Create an ownership-independent logical handoff snapshot."""
@@ -43,7 +60,7 @@ class NCMLevelExecutor:
     claim multi-GPU transport, dynamic batching, or concurrent thread safety.
     """
 
-    def __init__(self, runtime: Any, split: int = 5):
+    def __init__(self, runtime: Any, split: int = 5, *, prefix_cache=False, record_trace=True):
         self.runtime = runtime
         self.net = runtime.net
         self.vq = runtime.tokenizer.vqvae.vq
@@ -66,6 +83,10 @@ class NCMLevelExecutor:
         if net.training or runtime.tokenizer.vqvae.training:
             raise ValueError("models must be in eval mode")
         self.device = next(net.parameters()).device
+        self.prefix_cache = prefix_cache
+        self.record_trace = record_trace
+        if prefix_cache:
+            kv.validate_blocks(net)
         self.split = split
         self.model_id = self._model_fingerprint()
         self.states: dict[str, LevelState] = {}
@@ -90,6 +111,8 @@ class NCMLevelExecutor:
     ) -> LevelState:
         if request_id in self.states:
             raise ValueError("duplicate request_id")
+        if self.prefix_cache and torch.is_autocast_enabled(self.device.type):
+            raise ValueError("prefix cache requires FP32 execution with autocast disabled")
         if cfg not in (0.0, 1.0):
             raise ValueError("CFG must be 0 or 1 for the validated execution path")
         if (
@@ -187,10 +210,14 @@ class NCMLevelExecutor:
                     + state.pad_bias
                 )
                 rope = (net.rope_cos_gen_0, net.rope_sin_gen_0)
-                for block in net.transformer.blocks:
-                    hidden = block(hidden, attn_mask=mask, rope_cos_sin=rope)
+                if self.prefix_cache:
+                    hidden, state.prefix_kv = kv.prefill(net, hidden, state.pad_bias)
+                else:
+                    for block in net.transformer.blocks:
+                        hidden = block(hidden, attn_mask=mask, rope_cos_sin=rope)
+                    hidden = net.transformer.ln_f(hidden)
                 logits = net.lm_head_l0(
-                    net._level0_slice(net.transformer.ln_f(hidden), state.pad_mask)
+                    net._level0_slice(hidden, state.pad_mask)
                 )
             else:
                 embedded = self.vq.embeddings[level - 1](state.codes[-1])
@@ -203,9 +230,12 @@ class NCMLevelExecutor:
                 inputs = net.transformer.wte(inputs) + state.level_embedding[
                     :, offset : offset + self.levels[level], :
                 ]
-                logits = net._decode_level_logits(
-                    inputs, state.prefix, level - 1, state.pad_bias, hidx=level - 1
-                )
+                if self.prefix_cache:
+                    logits = kv.target_logits(net, inputs, state.prefix_kv, state.pad_bias, level - 1)
+                else:
+                    logits = net._decode_level_logits(
+                        inputs, state.prefix, level - 1, state.pad_bias, hidx=level - 1
+                    )
             if state.cfg > 0:
                 weight = state.cfg * (level / max(len(self.levels) - 1, 1))
                 logits = (
@@ -226,16 +256,18 @@ class NCMLevelExecutor:
                 state.device_rng = torch.cuda.get_rng_state(self.device).clone()
 
         state.next_level += 1
-        self.trace.append(
-            {
-                "request_id": state.request_id,
-                "group": group,
-                "level": level,
-                "concept_length": self.levels[level],
-                "batch_size": state.original_batch,
-            }
-        )
+        if self.record_trace:
+            self.trace.append(
+                {
+                    "request_id": state.request_id,
+                    "group": group,
+                    "level": level,
+                    "concept_length": self.levels[level],
+                    "batch_size": state.original_batch,
+                }
+            )
 
+    @release_on_error
     def short_group(self, state: LevelState) -> LevelState:
         self._validate(state)
         if state.next_level != 0:
@@ -244,16 +276,19 @@ class NCMLevelExecutor:
             self._step(state, "A")
         return state
 
+    @release_on_error
     def handoff(self, state: LevelState) -> LevelState:
         self._validate(state)
         if state.next_level != self.split:
             raise ValueError("handoff must occur at configured split")
         snapshot = state.snapshot()
         state.status = "transferred"
+        state.prefix_kv = None
         self.states[state.request_id] = snapshot
         return snapshot
 
     @torch.no_grad()
+    @release_on_error
     def long_group(self, state: LevelState) -> dict[str, torch.Tensor]:
         self._validate(state)
         if state.next_level != self.split:
@@ -265,6 +300,7 @@ class NCMLevelExecutor:
         latent = levels[-1].detach().clone()
         logits = self.runtime.tokenizer.vqvae.decoder(latent)
         state.status = "completed"
+        state.prefix_kv = None
         result = {"codes": codes, "latent": latent, "token_ids": logits.argmax(-1)}
         del self.states[state.request_id]
         return result
@@ -272,4 +308,12 @@ class NCMLevelExecutor:
     def cancel(self, state: LevelState) -> None:
         self._validate(state)
         state.status = "cancelled"
+        state.prefix_kv = None
         del self.states[state.request_id]
+
+    def abort(self, state: LevelState) -> None:
+        """Release an owned failed request without attempting to resume it."""
+        if self.states.get(state.request_id) is state:
+            state.prefix_kv = None
+            state.status = 'failed'
+            del self.states[state.request_id]

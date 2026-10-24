@@ -11,9 +11,10 @@ from .scheduler import TwoGroupScheduler
 
 
 class NCMServingSystem:
-    def __init__(self, runtime, *, split: int = 5):
+    def __init__(self, runtime, *, split: int = 5, prefix_cache=False, record_trace=True):
         self.runtime = runtime
-        self.executor = NCMLevelExecutor(runtime, split=split)
+        self.executor = NCMLevelExecutor(runtime, split=split, prefix_cache=prefix_cache,
+                                         record_trace=record_trace)
         self.scheduler = TwoGroupScheduler(self.executor)
 
     def submit_prefixes(

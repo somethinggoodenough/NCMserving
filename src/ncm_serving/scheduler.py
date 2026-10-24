@@ -58,9 +58,13 @@ class TwoGroupScheduler:
             record = self.requests[request_id]
             try:
                 record.result = self.executor.long_group(record.state)
+                record.state = None
                 record.status = RequestStatus.COMPLETED
                 record.completed_ns = monotonic_ns()
             except BaseException as exc:
+                if hasattr(self.executor, 'abort'):
+                    self.executor.abort(record.state)
+                record.state = None
                 record.status = RequestStatus.FAILED
                 record.error = f"{type(exc).__name__}: {exc}"
                 raise
@@ -76,6 +80,9 @@ class TwoGroupScheduler:
                 record.short_finished_ns = monotonic_ns()
                 self.long_queue.append(request_id)
             except BaseException as exc:
+                if hasattr(self.executor, 'abort'):
+                    self.executor.abort(record.state)
+                record.state = None
                 record.status = RequestStatus.FAILED
                 record.error = f"{type(exc).__name__}: {exc}"
                 raise
@@ -106,6 +113,7 @@ class TwoGroupScheduler:
         self.short_queue = deque(item for item in self.short_queue if item != request_id)
         self.long_queue = deque(item for item in self.long_queue if item != request_id)
         self.executor.cancel(record.state)
+        record.state = None
         record.status = RequestStatus.CANCELLED
         record.completed_ns = monotonic_ns()
 

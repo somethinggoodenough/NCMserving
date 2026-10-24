@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument("--prompt", action="append", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--split", type=int, default=5)
+    parser.add_argument("--prefix-cache", action="store_true")
     parser.add_argument("--seed", type=int, default=20261023)
     parser.add_argument("--cfg", type=float, choices=(0.0, 1.0), default=0.0)
     args = parser.parse_args()
@@ -26,7 +27,7 @@ def main() -> None:
         args.tokenizer_dir,
         device=args.device,
     )
-    serving = NCMServingSystem(runtime, split=args.split)
+    serving = NCMServingSystem(runtime, split=args.split, prefix_cache=args.prefix_cache)
     result = serving.generate_text(args.prompt, seed=args.seed, cfg=args.cfg)
     print(json.dumps({"texts": result["texts"], "token_ids": result["token_ids"].tolist()}))
 

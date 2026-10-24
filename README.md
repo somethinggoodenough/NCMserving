@@ -15,6 +15,10 @@ weights, tokenizer, or datasets. The current adapter targets NCM commit
 - Per-request codes, latent state, masks, model identity, and CPU/CUDA RNG.
 - Ownership-safe handoff, stale-state rejection, cancellation, and request queues.
 - A synchronous serving API and CLI for the WMT14 raw-prefix NCM path.
+- Optional request-local prefix KV cache with one level-0 prefill. Enable with
+  `prefix_cache=True` or `--prefix-cache`; the default remains eager. F01 quality
+  and performance acceptance is being evaluated separately from the historical
+  results below; see [the approved proposal](reports/proposals/F01-v1.md).
 
 The validated default is `split=5`: group A executes concept lengths
 `[1,4,8,14,20]`; group B executes `[26,32,40,48,56,64]`. Both groups currently
@@ -153,6 +157,12 @@ result = server.generate_text(
 print(result["texts"])
 ```
 
+The optional cache path uses `NCMServingSystem(runtime, split=5,
+prefix_cache=True)`. It stores per-block prefix K/V in request state, preserves
+padding and per-level RoPE, and releases that cache at completion, cancellation,
+or execution failure. It currently supports FP32 MHA with ordinary residual
+blocks. Unsupported configurations raise an error.
+
 Requests may also be submitted separately and advanced with
 `server.scheduler.step()`, allowing multiple requests to wait in the A/B queues.
 
@@ -172,6 +182,9 @@ ncm-serving \
 ```bash
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
+
+Set `NCM_ROOT` to the pinned external NCM checkout to include the actual-model
+CPU prefix-cache tests; otherwise those tests are explicitly skipped.
 
 The GPU boundary validator in `scripts/validate_wmt14.py` compares this serving
 executor with the upstream `net.generate` path. It is a correctness check, not a
