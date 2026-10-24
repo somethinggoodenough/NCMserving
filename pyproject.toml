@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ncm-serving"
+version = "0.1.0"
+description = "Concept-level grouped serving runtime for Next-Concept Models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "torch>=2.6",
+  "omegaconf>=2.3",
+]
+
+[project.scripts]
+ncm-serving = "ncm_serving.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
